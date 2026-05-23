@@ -134,13 +134,13 @@ def gerar_diagnosticos_corrigidos(linha: pd.Series) -> list[str]:
     Regras corrigidas conforme a lógica real do equipamento.
 
     Bomba:
-    - Se pressão = 0 e rpm = 0: bomba offline.
+    - Se pressão = 0, rpm = 0: e gps = null bomba offline.
     - Se GPS inválido/Null: problema de GPS da bomba.
     - Se pressão = 0, mas não está totalmente offline: pressão nula.
 
     Carretel:
-    - Se pressão do carretel = 0: carretel offline.
-    - Se pressão do carretel > 0 e pressão do aspersor = 0: aspersor offline.
+    - Se tudo estiver 0 ou null carretel offline.
+    - Se gps aspersor = 0 e pressão do aspersor = 0: aspersor offline.
     - GPS do aspersor Null: problema de GPS do aspersor.
     - GPS do carretel Null: problema de GPS do carretel.
     - Se pressão do carretel > 0 e recolhimento = 0: não está marcando recolhimento.
@@ -170,7 +170,7 @@ def gerar_diagnosticos_corrigidos(linha: pd.Series) -> list[str]:
         gps_aspersor_valido = valor_int(linha, "gps_aspersor_valido", 1)
         gps_carretel_valido = valor_int(linha, "gps_carretel_valido", 1)
 
-        carretel_offline = pressao_carretel <= 0
+        
 
         if (pressao_carretel <= 0 and pressao_aspersor <= 0 and velocidade_recolhimento <= 0 
             and gps_aspersor_valido == 0 and gps_carretel_valido == 0):
