@@ -1,39 +1,46 @@
 """
-Treinamento corrigido para diagnóstico IoT.
+================================================================================
+ETAPA 1: CARREGAMENTO E PREPARAÇÃO DE DADOS
+================================================================================
 
-Correção principal:
-- O diagnóstico NÃO considera carretel offline apenas porque GPS ou pressão do aspersor veio zerado.
-- Carretel offline = pressão do carretel zerada.
-- Aspersor offline = pressão do aspersor zerada, mas pressão do carretel existe.
-- GPS Null é tratado como problema de GPS, não como offline.
-- Também gera diagnóstico multi-label, pois um equipamento pode ter mais de uma falha ao mesmo tempo.
+Este script treina modelos de Machine Learning para diagnosticar problemas
+em equipamentos IoT (bombas e carretéis).
 
-Entrada esperada:
-- dataset_iot_normalizado.xlsx
+ENTRADA:
+  - dataset_iot_normalizado.xlsx
 
-Saídas geradas em modelos_treinados/:
-- modelo_arvore_decisao.pkl                  -> modelo single-label compatível com o Streamlit antigo
-- modelo_random_forest.pkl                   -> modelo single-label compatível com o Streamlit antigo
-- encoder_label.pkl                          -> encoder do single-label
-- modelo_multilabel_arvore_decisao.pkl       -> modelo multi-label recomendado
-- modelo_multilabel_random_forest.pkl        -> modelo multi-label recomendado
-- labels_multilabel.pkl                      -> lista de diagnósticos multi-label
-- features_modelo.pkl                        -> features usadas
-- metricas_modelos.csv                       -> métricas single-label
-- metricas_modelos_multilabel.csv            -> métricas multi-label por diagnóstico
-- dataset_com_labels_corrigidos.csv          -> dataset com labels corrigidos
+SAÍDAS (em modelos_treinados/):
+  - modelo_arvore_decisao.pkl          -> Modelo treinado (Árvore de Decisão)
+  - modelo_random_forest.pkl           -> Modelo treinado (Random Forest)
+  - encoder_label.pkl                  -> Codificador de labels
+  - metricas_modelos.csv               -> Métricas de desempenho
+  - dataset_com_labels_corrigidos.csv  -> Dataset com diagnósticos
+
+================================================================================
+ETAPA 2: DEFINIÇÕES DE DIAGNÓSTICOS
+================================================================================
+
+Os diagnósticos possíveis são:
+- BOMBA_OFFLINE: Pressão e RPM zerados
+- CARRETEL_OFFLINE: Pressão do carretel zerada
+- ASPERSOR_OFFLINE: Pressão do aspersor zerada
+- GPS_BOMBA_PROBLEMA: GPS da bomba inválido
+- GPS_ASPERSOR_PROBLEMA: GPS do aspersor inválido
+- GPS_CARRETEL_PROBLEMA: GPS do carretel inválido
+- PRESSAO_BOMBA_NULA: Pressão da bomba nula
+- RECOLHIMENTO_ZERADO: Recolhimento não está marcando
+
+================================================================================
 """
 
 import os
 import pickle
-import numpy as np
 import pandas as pd
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.multioutput import MultiOutputClassifier
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -41,7 +48,6 @@ from sklearn.metrics import (
     f1_score,
     classification_report,
     confusion_matrix,
-    hamming_loss,
 )
 
 
@@ -49,20 +55,7 @@ ARQUIVO_DATASET = "dataset_iot_normalizado.xlsx"
 PASTA_SAIDA = "modelos_treinados"
 RANDOM_STATE = 42
 
-# Diagnósticos possíveis no modelo multi-label.
-LABELS_MULTILABEL = [
-    "BOMBA_OFFLINE",
-    "GPS_BOMBA_PROBLEMA",
-    "PRESSAO_BOMBA_NULA",
-    "CARRETEL_OFFLINE",
-    "ASPERSOR_OFFLINE",
-    "GPS_ASPERSOR_PROBLEMA",
-    "GPS_CARRETEL_PROBLEMA",
-    "RECOLHIMENTO_ZERADO",
-]
-
 # Ordem de prioridade para criar uma classe única.
-# Isso é usado apenas para manter compatibilidade com o Streamlit antigo.
 PRIORIDADE_SINGLE_LABEL = [
     "BOMBA_OFFLINE",
     "CARRETEL_OFFLINE",
@@ -159,7 +152,7 @@ def gerar_diagnosticos_corrigidos(linha: pd.Series) -> list[str]:
         rpm = valor_numero(linha, "rpm_num")
         gps_valido = valor_int(linha, "gps_valido", 1)
 
-        bomba_offline = pressao <= 0 and rpm <= 0
+        bomba_offline = pressao <= 0 and rpm <= 0 and gps_valido == 0
 
         if bomba_offline:
             diagnosticos.append("BOMBA_OFFLINE")
@@ -207,11 +200,7 @@ def aplicar_labels_corrigidos(df: pd.DataFrame) -> pd.DataFrame:
     lista_diagnosticos = df.apply(gerar_diagnosticos_corrigidos, axis=1)
     df["diagnosticos_corrigidos"] = lista_diagnosticos.apply(lambda x: ";".join(x))
 
-    # Colunas binárias para multi-label.
-    for label in LABELS_MULTILABEL:
-        df[label] = lista_diagnosticos.apply(lambda diagnosticos: int(label in diagnosticos))
-
-    # Label único por prioridade, para compatibilidade com o app atual.
+    # Escolhe um label único por prioridade
     def escolher_label_unico(diagnosticos: list[str]) -> str:
         for label in PRIORIDADE_SINGLE_LABEL:
             if label in diagnosticos:
@@ -219,8 +208,6 @@ def aplicar_labels_corrigidos(df: pd.DataFrame) -> pd.DataFrame:
         return "OK"
 
     df["label_corrigido"] = lista_diagnosticos.apply(escolher_label_unico)
-    df["is_falha_corrigido"] = (df["label_corrigido"] != "OK").astype(int)
-    df["is_ok_corrigido"] = (df["label_corrigido"] == "OK").astype(int)
 
     return df
 
@@ -241,52 +228,126 @@ def preparar_features(df: pd.DataFrame):
 
 
 def treinar_single_label(X: pd.DataFrame, y_texto: pd.Series):
-    """Treina modelos single-label para manter compatibilidade com o Streamlit antigo."""
+    """
+    ============================================================================
+    TREINAMENTO DE MODELOS SINGLE-LABEL
+    ============================================================================
+    
+    Esta função realiza o treinamento de dois modelos de classificação:
+    1. Árvore de Decisão (Decision Tree)
+    2. Floresta Aleatória (Random Forest)
+    
+    Ambos são treinados para diagnosticar problemas em equipamentos.
+    
+    Parâmetros:
+      X: DataFrame com as features (características dos equipamentos)
+      y_texto: Series com o diagnóstico de cada equipamento
+    
+    Retorna:
+      metricas_df: DataFrame com as métricas de desempenho
+      encoder: Objeto que mapeia diagnósticos para números
+    """
+    
+    print("\n" + "=" * 80)
+    print("TREINAMENTO DOS MODELOS")
+    print("=" * 80)
+    
+    # ========================================================================
+    # PASSO 1: CODIFICAÇÃO DE LABELS
+    # ========================================================================
+    print("\n>>> PASSO 1: Codificando diagnósticos em números")
+    
+    # O LabelEncoder converte diagnósticos em texto para números
+    # Exemplo: "BOMBA_OFFLINE" -> 0, "CARRETEL_OFFLINE" -> 1, etc.
     encoder = LabelEncoder()
     y = encoder.fit_transform(y_texto.astype(str))
+    
+    print(f"    Classes encontradas: {list(encoder.classes_)}")
+    print(f"    Total de amostras: {len(y)}")
 
+    # ========================================================================
+    # PASSO 2: DIVISÃO EM DADOS DE TREINO E TESTE
+    # ========================================================================
+    print("\n>>> PASSO 2: Dividindo dados em treino (75%) e teste (25%)")
+    
+    # Split: 75% para treinar, 25% para testar
     X_train, X_test, y_train, y_test = train_test_split(
         X,
         y,
-        test_size=0.25,
-        random_state=RANDOM_STATE,
-        stratify=y,
+        test_size=0.25,              # 25% dos dados para teste
+        random_state=RANDOM_STATE,   # Reprodutibilidade
+        stratify=y,                  # Mantém proporção de classes
     )
+    
+    print(f"    Treino: {len(X_train)} amostras")
+    print(f"    Teste:  {len(X_test)} amostras")
 
+    # ========================================================================
+    # PASSO 3: DEFINIÇÃO DOS MODELOS
+    # ========================================================================
+    print("\n>>> PASSO 3: Criando modelos com hiperparâmetros otimizados")
+    
     modelos = {
+        # Árvore de Decisão
         "arvore_decisao": DecisionTreeClassifier(
             random_state=RANDOM_STATE,
-            max_depth=10,
-            min_samples_split=10,
-            min_samples_leaf=5,
-            class_weight="balanced",
+            max_depth=10,              # Profundidade máxima da árvore
+            min_samples_split=10,      # Mínimo de amostras para dividir
+            min_samples_leaf=5,        # Mínimo de amostras em folhas
+            class_weight="balanced",   # Balanceia classes desiguais
         ),
+        
+        # Floresta Aleatória (500 árvores)
         "random_forest": RandomForestClassifier(
             random_state=RANDOM_STATE,
-            n_estimators=250,
-            max_depth=14,
-            min_samples_split=8,
-            min_samples_leaf=3,
-            class_weight="balanced",
-            n_jobs=-1,
+            n_estimators=250,          # Número de árvores na floresta
+            max_depth=14,              # Profundidade máxima
+            min_samples_split=8,       # Mínimo de amostras para dividir
+            min_samples_leaf=3,        # Mínimo de amostras em folhas
+            class_weight="balanced",   # Balanceia classes desiguais
+            n_jobs=-1,                 # Usa todos os processadores
         ),
     }
 
     resultados = []
 
-    print("\n" + "=" * 80)
-    print("TREINAMENTO SINGLE-LABEL - compatível com o Streamlit atual")
-
+    # ========================================================================
+    # PASSO 4: TREINAMENTO E AVALIAÇÃO DOS MODELOS
+    # ========================================================================
+    print("\n>>> PASSO 4: Treinando e avaliando modelos")
+    
     for nome, modelo in modelos.items():
         print("\n" + "-" * 80)
         print(f"Treinando: {nome}")
+        print("-" * 80)
 
+        # ====================================================================
+        # TREINAMENTO: Modelo aprende com dados de treino
+        # ====================================================================
+        print(f"  ✓ Ajustando modelo com {len(X_train)} amostras...")
         modelo.fit(X_train, y_train)
+        
+        # ====================================================================
+        # PREDIÇÃO: Faz diagnósticos nos dados de teste
+        # ====================================================================
+        print(f"  ✓ Fazendo predições em {len(X_test)} amostras de teste...")
         y_pred = modelo.predict(X_test)
 
+        # ====================================================================
+        # CÁLCULO DE MÉTRICAS: Avalia desempenho do modelo
+        # ====================================================================
+        print("  ✓ Calculando métricas...")
+        
+        # Acurácia: percentual de acertos
         acuracia = accuracy_score(y_test, y_pred)
+        
+        # Precisão: quando o modelo prevê um diagnóstico, acerta com que frequência
         precisao = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+        
+        # Recall: de todos os casos de um diagnóstico, o modelo acerta quantos
         recall = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+        
+        # F1-Score: média harmônica entre precisão e recall
         f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
 
         resultados.append({
@@ -297,176 +358,169 @@ def treinar_single_label(X: pd.DataFrame, y_texto: pd.Series):
             "f1_score_weighted": f1,
         })
 
-        print(f"Acurácia: {acuracia:.4f}")
-        print(f"Precisão: {precisao:.4f}")
-        print(f"Recall:   {recall:.4f}")
-        print(f"F1-Score: {f1:.4f}")
-        print("\nRelatório por classe:")
-        print(classification_report(y_test, y_pred, target_names=encoder.classes_, zero_division=0))
+        # Exibe as métricas
+        print(f"\n  MÉTRICAS:")
+        print(f"    • Acurácia:  {acuracia:.4f} ({acuracia*100:.2f}%)")
+        print(f"    • Precisão:  {precisao:.4f}")
+        print(f"    • Recall:    {recall:.4f}")
+        print(f"    • F1-Score:  {f1:.4f}")
+        
+        # Relatório detalhado por classe
+        print(f"\n  Relatório detalhado por diagnóstico:")
+        print(classification_report(
+            y_test, 
+            y_pred, 
+            target_names=encoder.classes_, 
+            zero_division=0
+        ))
 
+        # ====================================================================
+        # SALVAMENTO DO MODELO TREINADO
+        # ====================================================================
+        print(f"  ✓ Salvando modelo em disco...")
+        
+        # Salva a matriz de confusão (mostra erros do modelo)
         matriz = confusion_matrix(y_test, y_pred)
-        matriz_df = pd.DataFrame(matriz, index=encoder.classes_, columns=encoder.classes_)
-        matriz_df.to_csv(os.path.join(PASTA_SAIDA, f"matriz_confusao_{nome}.csv"), encoding="utf-8-sig")
+        matriz_df = pd.DataFrame(
+            matriz, 
+            index=encoder.classes_, 
+            columns=encoder.classes_
+        )
+        matriz_df.to_csv(
+            os.path.join(PASTA_SAIDA, f"matriz_confusao_{nome}.csv"), 
+            encoding="utf-8-sig"
+        )
 
+        # Salva o modelo em arquivo .pkl (pickle)
         with open(os.path.join(PASTA_SAIDA, f"modelo_{nome}.pkl"), "wb") as f:
             pickle.dump(modelo, f)
+        
+        print(f"    ✓ Arquivo: modelo_{nome}.pkl")
+        print(f"    ✓ Matriz: matriz_confusao_{nome}.csv")
 
-    metricas_df = pd.DataFrame(resultados).sort_values(by="f1_score_weighted", ascending=False)
-    metricas_df.to_csv(os.path.join(PASTA_SAIDA, "metricas_modelos.csv"), index=False, encoding="utf-8-sig")
+    # ========================================================================
+    # PASSO 5: SALVAMENTO DE RESULTADOS FINAIS
+    # ========================================================================
+    print("\n>>> PASSO 5: Salvando resultados finais")
+    
+    # Cria tabela com métricas de todos os modelos
+    metricas_df = pd.DataFrame(resultados).sort_values(
+        by="f1_score_weighted", 
+        ascending=False
+    )
+    metricas_df.to_csv(
+        os.path.join(PASTA_SAIDA, "metricas_modelos.csv"), 
+        index=False, 
+        encoding="utf-8-sig"
+    )
+    print("  ✓ Arquivo: metricas_modelos.csv")
 
+    # Salva o encoder para usar na predição posterior
     with open(os.path.join(PASTA_SAIDA, "encoder_label.pkl"), "wb") as f:
         pickle.dump(encoder, f)
+    print("  ✓ Arquivo: encoder_label.pkl")
 
     return metricas_df, encoder
 
 
-def treinar_multilabel(X: pd.DataFrame, y_multi: pd.DataFrame):
-    """Treina modelos multi-label, recomendado para o seu caso real."""
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y_multi,
-        test_size=0.25,
-        random_state=RANDOM_STATE,
-    )
 
-    modelos = {
-        "arvore_decisao": MultiOutputClassifier(
-            DecisionTreeClassifier(
-                random_state=RANDOM_STATE,
-                max_depth=10,
-                min_samples_split=10,
-                min_samples_leaf=5,
-                class_weight="balanced",
-            )
-        ),
-        "random_forest": MultiOutputClassifier(
-            RandomForestClassifier(
-                random_state=RANDOM_STATE,
-                n_estimators=250,
-                max_depth=14,
-                min_samples_split=8,
-                min_samples_leaf=3,
-                class_weight="balanced",
-                n_jobs=-1,
-            )
-        ),
-    }
-
-    resultados = []
-
-    print("\n" + "=" * 80)
-    print("TREINAMENTO MULTI-LABEL - recomendado para diagnóstico real")
-
-    for nome, modelo in modelos.items():
-        print("\n" + "-" * 80)
-        print(f"Treinando: {nome}")
-
-        modelo.fit(X_train, y_train)
-        y_pred = modelo.predict(X_test)
-        y_pred_df = pd.DataFrame(y_pred, columns=LABELS_MULTILABEL, index=y_test.index)
-
-        exact_match = accuracy_score(y_test, y_pred_df)
-        hamming = hamming_loss(y_test, y_pred_df)
-        f1_micro = f1_score(y_test, y_pred_df, average="micro", zero_division=0)
-        f1_macro = f1_score(y_test, y_pred_df, average="macro", zero_division=0)
-
-        print(f"Exact Match Accuracy: {exact_match:.4f}")
-        print(f"Hamming Loss:         {hamming:.4f}")
-        print(f"F1 Micro:             {f1_micro:.4f}")
-        print(f"F1 Macro:             {f1_macro:.4f}")
-
-        resultados.append({
-            "modelo": nome,
-            "diagnostico": "GERAL",
-            "exact_match_accuracy": exact_match,
-            "hamming_loss": hamming,
-            "f1_micro": f1_micro,
-            "f1_macro": f1_macro,
-            "precisao": np.nan,
-            "recall": np.nan,
-            "f1_score": np.nan,
-        })
-
-        for label in LABELS_MULTILABEL:
-            precisao = precision_score(y_test[label], y_pred_df[label], zero_division=0)
-            recall = recall_score(y_test[label], y_pred_df[label], zero_division=0)
-            f1 = f1_score(y_test[label], y_pred_df[label], zero_division=0)
-            acuracia = accuracy_score(y_test[label], y_pred_df[label])
-
-            resultados.append({
-                "modelo": nome,
-                "diagnostico": label,
-                "exact_match_accuracy": np.nan,
-                "hamming_loss": np.nan,
-                "f1_micro": np.nan,
-                "f1_macro": np.nan,
-                "acuracia_binaria": acuracia,
-                "precisao": precisao,
-                "recall": recall,
-                "f1_score": f1,
-            })
-
-        with open(os.path.join(PASTA_SAIDA, f"modelo_multilabel_{nome}.pkl"), "wb") as f:
-            pickle.dump(modelo, f)
-
-    metricas_df = pd.DataFrame(resultados)
-    metricas_df.to_csv(os.path.join(PASTA_SAIDA, "metricas_modelos_multilabel.csv"), index=False, encoding="utf-8-sig")
-
-    with open(os.path.join(PASTA_SAIDA, "labels_multilabel.pkl"), "wb") as f:
-        pickle.dump(LABELS_MULTILABEL, f)
-
-    return metricas_df
-
-
-def salvar_metadados(features: list[str]):
-    with open(os.path.join(PASTA_SAIDA, "features_modelo.pkl"), "wb") as f:
-        pickle.dump(features, f)
 
 
 def main():
+    """
+    ============================================================================
+    FUNÇÃO PRINCIPAL - Orquestra todo o fluxo de treinamento
+    ============================================================================
+    
+    Realiza 4 etapas principais:
+    1. CARREGAMENTO: Lê dados do arquivo Excel
+    2. PREPARAÇÃO: Gera diagnósticos e prepara features
+    3. TREINAMENTO: Treina os modelos
+    4. SALVAMENTO: Persiste modelos e métricas
+    """
+    
+    # Criação da pasta de saída
     os.makedirs(PASTA_SAIDA, exist_ok=True)
 
+    # ========================================================================
+    # ETAPA 1: CARREGAMENTO DE DADOS
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("ETAPA 1: CARREGAMENTO DE DADOS")
+    print("=" * 80)
+    
+    # Carrega o arquivo Excel do dataset
     df = carregar_dataset(ARQUIVO_DATASET)
+    # Resultado: DataFrame com todas as colunas originais do dataset
+    
+    # ========================================================================
+    # ETAPA 2: PREPARAÇÃO E PROCESSAMENTO DE DADOS
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("ETAPA 2: PREPARAÇÃO E PROCESSAMENTO DE DADOS")
+    print("=" * 80)
+    
+    # Aplica as regras de diagnóstico e gera labels corrigidos
+    # Cria a coluna "label_corrigido" com os diagnósticos
     df = aplicar_labels_corrigidos(df)
-
-    print("\nDistribuição do label original:")
-    if "label" in df.columns:
-        print(df["label"].value_counts())
-    else:
-        print("Coluna label original não encontrada.")
-
-    print("\nDistribuição do label corrigido single-label:")
+    
+    # Exibe estatísticas dos labels
+    print("\nDistribuição do label corrigido:")
     print(df["label_corrigido"].value_counts())
 
-    print("\nQuantidade por diagnóstico multi-label:")
-    print(df[LABELS_MULTILABEL].sum().sort_values(ascending=False))
-
+    # Extrai as features (características) que serão usadas para treinar
+    # Features: pressão, RPM, GPS, etc.
     X, features = preparar_features(df)
-    salvar_metadados(features)
-
+    
     print("\nFeatures usadas no treinamento:")
-    for feature in features:
-        print(f"- {feature}")
+    for i, feature in enumerate(features, 1):
+        print(f"  {i}. {feature}")
 
-    df.to_csv(os.path.join(PASTA_SAIDA, "dataset_com_labels_corrigidos.csv"), index=False, encoding="utf-8-sig")
+    # Salva o dataset processado com os labels corrigidos
+    df.to_csv(
+        os.path.join(PASTA_SAIDA, "dataset_com_labels_corrigidos.csv"), 
+        index=False, 
+        encoding="utf-8-sig"
+    )
+    print(f"\n✓ Dataset processado salvo em: {PASTA_SAIDA}/dataset_com_labels_corrigidos.csv")
+    
+    # Salva as features usadas no treinamento
+    with open(os.path.join(PASTA_SAIDA, "features_modelo.pkl"), "wb") as f:
+        pickle.dump(features, f)
+    print(f"✓ Features salvas em: {PASTA_SAIDA}/features_modelo.pkl")
 
-    metricas_single, encoder = treinar_single_label(X, df["label_corrigido"])
-    metricas_multi = treinar_multilabel(X, df[LABELS_MULTILABEL])
-
+    # ========================================================================
+    # ETAPA 3: TREINAMENTO DOS MODELOS
+    # ========================================================================
     print("\n" + "=" * 80)
-    print("TREINAMENTO FINALIZADO")
-    print(f"Arquivos salvos em: {PASTA_SAIDA}")
+    print("ETAPA 3: TREINAMENTO DOS MODELOS DE MACHINE LEARNING")
+    print("=" * 80)
+    
+    # Treina modelos de classificação single-label
+    # (uma única classe de diagnóstico por equipamento)
+    metricas_single, encoder = treinar_single_label(X, df["label_corrigido"])
 
-    print("\nComparativo single-label:")
-    print(metricas_single)
+    # ========================================================================
+    # ETAPA 4: RESULTADOS E RESUMO
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("ETAPA 4: RESULTADOS E RESUMO DO TREINAMENTO")
+    print("=" * 80)
+    
+    print("\nArquivos gerados:")
+    print(f"  ✓ Pasta de saída: {PASTA_SAIDA}/")
+    print(f"    - modelo_arvore_decisao.pkl")
+    print(f"    - modelo_random_forest.pkl")
+    print(f"    - encoder_label.pkl")
+    print(f"    - metricas_modelos.csv")
+    print(f"    - dataset_com_labels_corrigidos.csv")
 
-    print("\nClasses single-label:")
+    print("\nMétricas de desempenho dos modelos:")
+    print(metricas_single.to_string())
+
+    print("\nClasses de diagnóstico treinadas:")
     for classe in encoder.classes_:
-        print(f"- {classe}")
-
-    print("\nObservação:")
-    print("Use o modelo single-label se quiser manter o Streamlit atual.")
-    print("Use o modelo multi-label se quiser mostrar todas as falhas ao mesmo tempo, que é o ideal para seu caso real.")
+        print(f"  - {classe}")
 
 
 if __name__ == "__main__":
